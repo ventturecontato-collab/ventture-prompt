@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sistema de Teste de Prompts</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- COLUNA ESQUERDA: configuracoes do "playground" -->
+    <aside class="config" id="configPanel">
+      <div class="config-header">
+        <h1>⚙️ Configuração</h1>
+        <p class="muted">Defina prompt, modelo e chaves. Tudo salvo no servidor.</p>
+      </div>
+
+      <div class="config-body">
+        <section class="card">
+          <h2>Provedor & Modelo</h2>
+          <label>Provedor</label>
+          <select id="provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="compativel">OpenAI-compatível (OpenRouter/Groq/local)</option>
+          </select>
+
+          <label>Modelo <span class="muted" id="modelCount"></span></label>
+          <div class="combobox" id="modelCombo">
+            <input id="model" autocomplete="off" readonly placeholder="clique para selecionar um modelo" />
+            <button type="button" class="combo-toggle" id="modelToggle" tabindex="-1">▾</button>
+            <ul class="combo-list hidden" id="modelList"></ul>
+          </div>
+          <p class="model-hint hidden" id="modelHint"></p>
+
+          <div id="compativelBox" class="hidden">
+            <label>Base URL (compatível)</label>
+            <input id="compativelBaseUrl" placeholder="https://openrouter.ai/api/v1" />
+          </div>
+
+          <label>Temperature: <span id="tempVal">0.7</span></label>
+          <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7" />
+        </section>
+
+        <section class="card">
+          <h2>🔑 API Keys</h2>
+          <p class="muted">Uma chave por provedor. Fica salva em <code>config.json</code> (local).</p>
+          <label>OpenAI <span class="dot" id="dot-openai"></span></label>
+          <input type="password" id="key-openai" placeholder="sk-..." />
+          <label>Anthropic <span class="dot" id="dot-anthropic"></span></label>
+          <input type="password" id="key-anthropic" placeholder="sk-ant-..." />
+          <label>Gemini <span class="dot" id="dot-gemini"></span></label>
+          <input type="password" id="key-gemini" placeholder="AIza..." />
+          <label>Compatível <span class="dot" id="dot-compativel"></span></label>
+          <input type="password" id="key-compativel" placeholder="chave do endpoint" />
+        </section>
+
+        <section class="card">
+          <h2>📝 Prompt do Sistema</h2>
+          <textarea id="systemPrompt" rows="6" placeholder="Você é um assistente..."></textarea>
+        </section>
+
+        <section class="card">
+          <h2>🧠 Memória</h2>
+          <label>Context Window (nº de mensagens enviadas como contexto)</label>
+          <input type="number" id="contextWindow" min="0" max="200" value="20" />
+          <p class="muted">Cada conversa tem um <code>session_id</code>. As últimas N mensagens viram contexto — igual ao nó "Postgres Chat Memory" do n8n.</p>
+        </section>
+
+        <section class="card">
+          <h2>🗄️ Banco de dados <span class="storage-badge" id="storageBadge">SQLite</span></h2>
+          <p class="muted">Vazio = usa SQLite local. Preencha para guardar a memória no seu <b>Supabase</b> (Postgres). A chave fica só no servidor.</p>
+          <label>Supabase URL <span class="dot" id="dot-supabase-url"></span></label>
+          <input id="supabaseUrl" placeholder="https://xxxx.supabase.co" />
+          <label>service_role key <span class="dot" id="dot-supabase-key"></span></label>
+          <input type="password" id="supabaseKey" placeholder="cole a service_role key" />
+          <p class="muted" id="storageWarn"></p>
+        </section>
+
+        <section class="card">
+          <h2>🔧 Tools</h2>
+          <p class="muted">O prompt pode "ativar" estas tools. Elas não executam nada real — o sistema só avisa quando são acionadas.</p>
+          <div id="toolsList"></div>
+          <button class="btn-ghost" id="addTool">+ Adicionar tool</button>
+        </section>
+
+        <button class="btn-primary" id="saveConfig">💾 Salvar configuração</button>
+        <p class="save-status" id="saveStatus"></p>
+      </div>
+    </aside>
+
+    <!-- COLUNA MEIO: lista de conversas (sessões/memórias) -->
+    <nav class="sessions">
+      <div class="sessions-header">
+        <span>Conversas</span>
+        <button id="newChat" title="Nova conversa">＋</button>
+      </div>
+      <ul id="sessionList"></ul>
+    </nav>
+
+    <!-- COLUNA DIREITA: chat estilo WhatsApp -->
+    <main class="chat">
+      <header class="chat-header">
+        <div class="avatar">IA</div>
+        <div class="chat-title">
+          <strong id="chatTitle">Assistente</strong>
+          <small id="chatSub">selecione um modelo e comece</small>
+        </div>
+        <div class="chat-actions">
+          <button id="clearMemory" title="Limpar memória desta conversa">🧹</button>
+          <button id="toggleConfig" title="Mostrar/ocultar config">⚙️</button>
+        </div>
+      </header>
+
+      <div class="messages" id="messages"></div>
+
+      <footer class="composer">
+        <textarea id="input" rows="1" placeholder="Digite uma mensagem"></textarea>
+        <button id="send" title="Enviar">➤</button>
+      </footer>
+    </main>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Guarda as API keys - NUNCA comitar
+config.json
+
+# Banco da memoria (SQLite)
+memoria.db
+memoria.db-wal
+memoria.db-shm
+
+# Logs de runtime
+boot.log
+boot.err.log
+*.log
+
+# Arquivo vazio acidental
+sistema
+
+# Lixo de SO / editor
+__pycache__/
+*.pyc
+.DS_Store
