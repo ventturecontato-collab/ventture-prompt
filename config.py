@@ -59,16 +59,42 @@ def _deep_merge(base, override):
     return out
 
 
+# Variaveis de ambiente que sobrescrevem o config.json (uso em producao/container).
+# So sobrescrevem quando definidas e nao-vazias -> tem prioridade sobre o arquivo.
+_ENV_MAP = {
+    "OPENAI_API_KEY": ("api_keys", "openai"),
+    "ANTHROPIC_API_KEY": ("api_keys", "anthropic"),
+    "GEMINI_API_KEY": ("api_keys", "gemini"),
+    "COMPATIVEL_API_KEY": ("api_keys", "compativel"),
+    "COMPATIVEL_BASE_URL": ("compativel_base_url",),
+    "SUPABASE_URL": ("supabase", "url"),
+    "SUPABASE_SERVICE_KEY": ("supabase", "service_key"),
+}
+
+
+def _apply_env_overrides(cfg):
+    """Sobrepoe segredos/ajustes vindos de variaveis de ambiente (se definidos)."""
+    for env_name, path in _ENV_MAP.items():
+        val = os.environ.get(env_name)
+        if not val:
+            continue
+        target = cfg
+        for key in path[:-1]:
+            target = target.setdefault(key, {})
+        target[path[-1]] = val
+    return cfg
+
+
 def load():
     with _lock:
         if not os.path.exists(CONFIG_PATH):
-            return json.loads(json.dumps(DEFAULTS))
+            return _apply_env_overrides(json.loads(json.dumps(DEFAULTS)))
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return _deep_merge(DEFAULTS, data)
+            return _apply_env_overrides(_deep_merge(DEFAULTS, data))
         except Exception:
-            return json.loads(json.dumps(DEFAULTS))
+            return _apply_env_overrides(json.loads(json.dumps(DEFAULTS)))
 
 
 def _strip_masked(cfg):

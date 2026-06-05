@@ -304,7 +304,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    port = 8000
+    # Porta e host vem do ambiente (producao/container) com fallback local.
+    port = int(os.environ.get("PORT", "8000"))
+    host = os.environ.get("HOST", "0.0.0.0")
     if len(sys.argv) > 1:
         try:
             port = int(sys.argv[1])
@@ -312,10 +314,10 @@ def main():
             pass
     db.init_db()
     storage = db.active_storage()
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
     print("=" * 56)
     print("  Sistema de Teste de Prompts")
-    print(f"  Rodando em:  http://localhost:{port}")
+    print(f"  Escutando em: {host}:{port}  (local: http://localhost:{port})")
     print(f"  Memoria:     {storage.upper()}", end="")
     warn = db.storage_warning()
     print(f"  (Supabase indisponivel -> SQLite: {warn})" if warn else "")

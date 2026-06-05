@@ -1,0 +1,18 @@
+# Segredos e dados locais - NUNCA entram na imagem
+config.json
+memoria.db
+memoria.db-wal
+memoria.db-shm
+
+# Logs de runtime
+*.log
+boot.log
+boot.err.log
+
+# Lixo de Python / SO / VCS
+__pycache__/
+*.pyc
+.git
+.gitignore
+.DS_Store
+sistema
