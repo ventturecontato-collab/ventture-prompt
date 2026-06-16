@@ -35,6 +35,13 @@ DEFAULTS = {
     "system_prompt": "Voce e um assistente prestativo. Responda em portugues do Brasil.",
     "temperature": 0.7,
     "context_window": 20,  # quantas mensagens da memoria mandar como contexto
+    # Agente Testador Automatico (tester.py). Provider/model vazios = usa os
+    # da conversa-alvo. A API key e reaproveitada de api_keys[provider].
+    "tester": {
+        "provider": "",   # vazio = usa o mesmo provider da conversa-alvo
+        "model": "",      # vazio = usa o mesmo modelo da conversa-alvo
+        "max_turns": 12,  # teto de seguranca da conversa simulada
+    },
     # Tools que o prompt pode "ativar". Sem funcao real - so alertamos.
     "tools": [
         {

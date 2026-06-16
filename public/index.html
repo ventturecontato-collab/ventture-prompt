@@ -63,6 +63,25 @@
         </section>
 
         <section class="card">
+          <h2>🤖 Agente Testador</h2>
+          <p class="muted">Um segundo agente conversa sozinho com a IA-alvo e gera um relatório. Deixe vazio para usar o mesmo provedor/modelo da conversa.</p>
+          <label>Provedor do testador</label>
+          <select id="testerProvider">
+            <option value="">(usar o da conversa)</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="compativel">OpenAI-compatível</option>
+          </select>
+          <label>Modelo do testador</label>
+          <input id="testerModel" placeholder="(usar o da conversa)" />
+          <label>Máx. de turnos (teto de segurança)</label>
+          <input type="number" id="testerMaxTurns" min="1" max="30" value="12" />
+          <label>Foco do teste (opcional)</label>
+          <textarea id="testerFocus" rows="3" placeholder="Diga o que quer testar. Ex.: forçar o acionamento da tool 'agendamento'; ver se ela pede o nome antes de marcar; testar respostas sobre preços."></textarea>
+        </section>
+
+        <section class="card">
           <h2>🧠 Memória</h2>
           <label>Context Window (nº de mensagens enviadas como contexto)</label>
           <input type="number" id="contextWindow" min="0" max="200" value="20" />
@@ -109,6 +128,8 @@
           <small id="chatSub">selecione um modelo e comece</small>
         </div>
         <div class="chat-actions">
+          <button id="openReport" class="hidden" title="Ver relatório do teste desta conversa">📊</button>
+          <button id="runTester" title="Testar o prompt automaticamente">🤖</button>
           <button id="clearMemory" title="Limpar memória desta conversa">🧹</button>
           <button id="toggleConfig" title="Mostrar/ocultar config">⚙️</button>
         </div>
@@ -122,6 +143,37 @@
       </footer>
     </main>
 
+  </div>
+
+  <!-- MODAL: foco do teste (abre ao clicar no 🤖, antes de rodar) -->
+  <div class="modal-overlay hidden" id="focusModal">
+    <div class="modal modal-sm">
+      <header class="modal-header">
+        <strong>🤖 O que testar?</strong>
+        <button class="modal-close" id="focusCancel" title="Fechar">✕</button>
+      </header>
+      <div class="modal-body">
+        <p class="muted">Descreva o que o agente deve testar especificamente nesta rodada (opcional). Deixe vazio para um teste geral.</p>
+        <textarea id="focusInput" rows="4" placeholder="Ex.: forçar o acionamento da tool 'agendamento'; ver se ela pede o nome antes de marcar; testar respostas sobre preços."></textarea>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="focusCancel2">Cancelar</button>
+          <button class="btn-primary" id="focusRun">🤖 Testar agora</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: relatorio do Agente Testador Automatico -->
+  <div class="modal-overlay hidden" id="testerModal">
+    <div class="modal">
+      <header class="modal-header">
+        <strong>🤖 Relatório do Agente Testador</strong>
+        <button class="modal-close" id="testerClose" title="Fechar">✕</button>
+      </header>
+      <div class="modal-body" id="testerBody">
+        <!-- preenchido por app.js -->
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>

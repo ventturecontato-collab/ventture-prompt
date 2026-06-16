@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import config
 import db
 import providers
+import tester
 
 PUBLIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
 
@@ -32,6 +33,10 @@ TOOL_STUB_RESULT = (
 )
 
 MAX_TOOL_ROUNDS = 4
+
+# Limites de tamanho de payload (anti-abuso / evita travar com entradas gigantes)
+MAX_MESSAGE_CHARS = 100_000   # mensagem do chat
+MAX_FOCUS_CHARS = 4_000       # "foco do teste" do Agente Testador
 
 
 # --------------------------------------------------------------------------- #
@@ -131,6 +136,42 @@ def run_chat(session_id, user_text, settings=None):
     }
 
 
+def _persist_test(result, settings):
+    """Salva a conversa simulada do Agente Testador como uma sessao normal.
+
+    - A conversa vira mensagens human/ai (aparece igual as outras na lista).
+    - O relatorio fica numa mensagem especial (extra.kind == 'tester_report'),
+      para o front poder reabri-lo depois. Retorna o session_id criado.
+    """
+    test_sid = f"test-{int(time.time())}"
+    transcript = result.get("transcript", [])
+    report = result.get("report", {}) or {}
+
+    # titulo amigavel: prefixo + 1a fala do usuario-simulado + nota (se houver)
+    first_user = next((m["content"] for m in transcript if m["role"] == "user"), "")
+    base = (first_user[:34] + "...") if len(first_user) > 34 else (first_user or "Teste de prompt")
+    nota = report.get("nota")
+    title = "🤖 Teste: " + base + (f" (nota {nota})" if nota is not None else "")
+
+    # a sessao guarda a config da IA-alvo que foi testada
+    db.upsert_session(test_sid, title=title, settings=settings or None)
+
+    # baloes da conversa (com selo do modelo da IA-alvo nas respostas)
+    ai_extra = {"provider": result.get("target_provider"), "model": result.get("target_model")}
+    for m in transcript:
+        if m["role"] == "user":
+            db.add_message(test_sid, "human", m["content"])
+        else:
+            db.add_message(test_sid, "ai", m["content"], extra=dict(ai_extra))
+
+    # mensagem especial com o relatorio (nao e exibida como balao; abre no modal)
+    db.add_message(
+        test_sid, "ai", "Relatório do Agente Testador",
+        extra={"kind": "tester_report", "report": report, "turns": result.get("turns", 0)},
+    )
+    return test_sid
+
+
 def _to_normalized(history):
     """Converte mensagens do banco (formato LangChain) para o formato normalizado.
 
@@ -190,11 +231,23 @@ class Handler(BaseHTTPRequestHandler):
             ".ico": "image/x-icon",
         }
         ctype = ctypes.get(ext, "application/octet-stream")
+        # ETag por mtime+size: navegador revalida e recebe 304 se nada mudou
+        # (evita rebaixar o arquivo inteiro a cada F5, sem servir conteudo velho).
+        st = os.stat(path)
+        etag = f'"{int(st.st_mtime)}-{st.st_size}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
         with open(path, "rb") as f:
             data = f.read()
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(data)
 
@@ -234,10 +287,17 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        # estaticos
-        rel = "index.html" if path in ("/", "") else path.lstrip("/")
-        rel = rel.replace("..", "")  # anti path traversal
-        self._send_file(os.path.join(PUBLIC_DIR, rel))
+        # estaticos: resolve e garante que o caminho final fica DENTRO de public/
+        rel = "index.html" if path in ("/", "") else urllib.parse.unquote(path.lstrip("/"))
+        full = os.path.abspath(os.path.normpath(os.path.join(PUBLIC_DIR, rel)))
+        try:
+            inside = os.path.commonpath([full, PUBLIC_DIR]) == PUBLIC_DIR
+        except ValueError:  # drives diferentes etc.
+            inside = False
+        if not inside:
+            self.send_error(404, "Nao encontrado")
+            return
+        self._send_file(full)
 
     # ---- POST ----
     def do_POST(self):
@@ -273,12 +333,48 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 self._send_json({"error": "Mensagem vazia."}, status=400)
                 return
+            if len(text) > MAX_MESSAGE_CHARS:
+                self._send_json(
+                    {"error": f"Mensagem muito longa (max {MAX_MESSAGE_CHARS} caracteres)."},
+                    status=400,
+                )
+                return
             try:
                 result = run_chat(session_id, text, settings=body.get("settings"))
                 result["session_id"] = session_id
                 self._send_json(result)
             except providers.ProviderError as e:
                 # status mais preciso conforme o tipo do erro do provedor
+                kind = getattr(e, "kind", "provider")
+                status = {"timeout": 504, "rate_limit": 429, "server": 502}.get(kind, 502)
+                self._send_json({"error": str(e), "kind": kind}, status=status)
+            except Exception as e:  # noqa
+                self._send_json({"error": f"Erro interno: {e}"}, status=500)
+            return
+
+        if path == "/api/test":
+            # Roda o Agente Testador Automatico contra a config da IA-alvo e
+            # SALVA a conversa simulada como uma sessao normal (aparece na lista),
+            # guardando o relatorio numa mensagem especial para poder reabrir.
+            settings = body.get("settings") or {}
+            cfg = config.load()
+            # override da config do testador vindo da UI (provider/model/max_turns/foco),
+            # para valer ja nesta execucao sem precisar salvar a config antes
+            tester_over = body.get("tester")
+            if isinstance(tester_over, dict):
+                cfg = {**cfg, "tester": {**(cfg.get("tester") or {}), **tester_over}}
+            # limita o tamanho do "foco" para evitar prompts gigantes
+            _tc = cfg.get("tester") or {}
+            if isinstance(_tc.get("focus"), str) and len(_tc["focus"]) > MAX_FOCUS_CHARS:
+                cfg = {**cfg, "tester": {**_tc, "focus": _tc["focus"][:MAX_FOCUS_CHARS]}}
+            try:
+                result = tester.run_test(cfg, settings)
+                try:
+                    result["session_id"] = _persist_test(result, settings)
+                except Exception as e:  # noqa - nao perde o relatorio se o save falhar
+                    result["save_error"] = f"Falha ao salvar a sessao de teste: {e}"
+                self._send_json(result)
+            except providers.ProviderError as e:
                 kind = getattr(e, "kind", "provider")
                 status = {"timeout": 504, "rate_limit": 429, "server": 502}.get(kind, 502)
                 self._send_json({"error": str(e), "kind": kind}, status=status)

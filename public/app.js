@@ -1,9 +1,25 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+// Helper robusto: nunca lança. Falha de rede / resposta não-JSON / erro HTTP
+// viram { error: "..." }, para os callers tratarem sem travar a UI/boot.
 const api = async (url, opts) => {
-  const r = await fetch(url, opts);
-  return r.json();
+  try {
+    const r = await fetch(url, opts);
+    const text = await r.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      return { error: `Resposta inválida do servidor (HTTP ${r.status}).` };
+    }
+    if (!r.ok && (!data || data.error === undefined)) {
+      return { error: `Erro ${r.status} do servidor.` };
+    }
+    return data;
+  } catch (e) {
+    return { error: "Falha de rede: " + (e && e.message ? e.message : e) };
+  }
 };
 
 // Modelos por provedor. tag = etiqueta curta exibida na direita.
@@ -138,7 +154,9 @@ let state = {
   config: null,
   sessionId: null,
   sending: false,
+  testing: false, // true enquanto o Agente Testador roda
   sessionExists: false, // true quando a conversa atual já tem settings/mensagens salvas
+  currentReport: null, // relatório da conversa aberta (p/ reabrir no modal), se houver
 };
 
 // modelos buscados ao vivo na API (cache por provedor, durante a sessão)
@@ -158,6 +176,13 @@ async function loadConfig() {
   $("tempVal").textContent = cfg.temperature ?? 0.7;
   $("contextWindow").value = cfg.context_window ?? 20;
   $("compativelBaseUrl").value = cfg.compativel_base_url || "";
+
+  // config do Agente Testador
+  const t = cfg.tester || {};
+  $("testerProvider").value = t.provider || "";
+  $("testerModel").value = t.model || "";
+  $("testerMaxTurns").value = t.max_turns ?? 12;
+  $("testerFocus").value = t.focus || "";
 
   // indicadores de chave configurada
   const set = cfg.api_keys_set || {};
@@ -196,8 +221,26 @@ function collectSettings() {
     model: $("model").value.trim(),
     system_prompt: $("systemPrompt").value,
     temperature: parseFloat($("temperature").value),
-    context_window: parseInt($("contextWindow").value, 10) || 0,
+    context_window: readContextWindow(),
     tools: collectTools(),
+  };
+}
+
+// lê o context_window do painel: vazio -> default (20); 0 explícito é respeitado
+function readContextWindow() {
+  const raw = $("contextWindow").value.trim();
+  if (raw === "") return 20;
+  const n = parseInt(raw, 10);
+  return Number.isNaN(n) ? 20 : Math.max(0, n);
+}
+
+// config do Agente Testador lida do painel
+function collectTesterSettings() {
+  return {
+    provider: $("testerProvider").value,
+    model: $("testerModel").value.trim(),
+    max_turns: parseInt($("testerMaxTurns").value, 10) || 12,
+    focus: $("testerFocus").value.trim(), // o que o usuário quer que seja testado
   };
 }
 
@@ -269,37 +312,24 @@ function renderModelList(filter = "") {
   const all = currentModels();
   const items = f ? all.filter((m) => m.id.toLowerCase().includes(f)) : all;
   const selected = $("model").value.trim();
-
-  list.innerHTML = "";
-
   const p = $("provider").value;
+
+  // monta a lista inteira numa única string (1 reflow) com data-id para
+  // event delegation — evita criar ~100 listeners e N appendChild em loop
+  let header = "";
   if (modelSource[p] === "loading") {
-    const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = "buscando modelos na API…";
-    list.appendChild(li);
+    header = `<li class="empty">buscando modelos na API…</li>`;
   } else if (modelSource[p] === "fallback" && modelErr[p]) {
-    const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = "API indisponível — usando lista local";
-    li.title = modelErr[p];
-    list.appendChild(li);
+    header = `<li class="empty" title="${escapeAttr(modelErr[p])}">API indisponível — usando lista local</li>`;
   }
 
-  items.forEach((m) => {
-    const li = document.createElement("li");
-    if (m.id === selected) li.classList.add("is-selected");
-    li.innerHTML = `<span>${escapeHtml(m.id)}</span><span class="tag">${escapeHtml(m.tag || "")}</span>`;
-    li.onmousedown = (e) => { e.preventDefault(); chooseModel(m.id); };
-    list.appendChild(li);
-  });
+  const rows = items.map((m) =>
+    `<li class="${m.id === selected ? "is-selected" : ""}" data-id="${escapeAttr(m.id)}">` +
+    `<span>${escapeHtml(m.id)}</span><span class="tag">${escapeHtml(m.tag || "")}</span></li>`
+  ).join("");
 
-  if (!list.children.length) {
-    const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = "Nenhum modelo encontrado";
-    list.appendChild(li);
-  }
+  const empty = (!items.length && !header) ? `<li class="empty">Nenhum modelo encontrado</li>` : "";
+  list.innerHTML = header + rows + empty;
 
   updateModelCount();
 }
@@ -337,9 +367,10 @@ function updateModelHint() {
   }
 }
 
-// dispara a busca ao vivo e atualiza o contador/lista
+// atualiza contador/lista. NÃO busca modelos na API aqui (lazy): o fetch ao vivo
+// só acontece ao abrir o dropdown (openModelList) ou trocar de provedor — evita
+// chamada externa no boot e ao abrir cada conversa.
 function updateModelSuggestions() {
-  ensureModels($("provider").value);
   updateModelCount();
   if (!$("modelList").classList.contains("hidden")) renderModelList();
   updateModelHint();
@@ -383,9 +414,10 @@ async function saveConfig() {
     model: $("model").value.trim(),
     system_prompt: $("systemPrompt").value,
     temperature: parseFloat($("temperature").value),
-    context_window: parseInt($("contextWindow").value, 10) || 0,
+    context_window: readContextWindow(),
     compativel_base_url: $("compativelBaseUrl").value.trim(),
     tools: collectTools(),
+    tester: collectTesterSettings(),
     api_keys: {},
     supabase: {},
   };
@@ -435,7 +467,8 @@ async function saveConfig() {
 
 /* ----------------------------- SESSIONS ----------------------------- */
 async function loadSessions() {
-  const { sessions } = await api("/api/sessions");
+  const data = await api("/api/sessions");
+  const sessions = data.sessions || []; // resiliente a erro/resposta inesperada
   const ul = $("sessionList");
   ul.innerHTML = "";
   if (!sessions.length) {
@@ -446,15 +479,35 @@ async function loadSessions() {
     if (s.session_id === state.sessionId) li.classList.add("active");
     li.innerHTML = `
       <div class="s-title">${escapeHtml(s.title || "Conversa")}</div>
-      <div class="s-meta">${s.msg_count} msgs · ${fmtTime(s.updated_at)}</div>`;
+      <div class="s-meta">${s.msg_count} msgs · ${fmtTime(s.updated_at)}</div>
+      <button class="s-del" title="Excluir conversa">🗑️</button>`;
     li.onclick = () => openSession(s.session_id);
+    li.querySelector(".s-del").onclick = (e) => {
+      e.stopPropagation(); // não abre a conversa ao clicar na lixeira
+      deleteSession(s.session_id);
+    };
     ul.appendChild(li);
   });
+}
+
+// exclui uma conversa (com confirmação) e atualiza a lista
+async function deleteSession(id) {
+  if (!confirm("Excluir esta conversa? Esta ação não pode ser desfeita.")) return;
+  const res = await api("/api/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: id }),
+  });
+  if (res && res.error) { addNotice("⚠️ " + escapeHtml(res.error), "err"); return; }
+  if (id === state.sessionId) newChat(); // excluiu a conversa aberta -> abre uma nova
+  else loadSessions();
 }
 
 function newChat() {
   state.sessionId = "sess-" + Date.now();
   state.sessionExists = false; // ainda não salva; usa os defaults do painel
+  state.currentReport = null;
+  toggleReportButton();
   $("messages").innerHTML = "";
   showEmptyState();
   loadSessions();
@@ -465,11 +518,29 @@ function newChat() {
 async function openSession(id) {
   state.sessionId = id;
   state.sessionExists = true;
-  const { messages, settings } = await api("/api/messages/" + encodeURIComponent(id));
+  const data = await api("/api/messages/" + encodeURIComponent(id));
+  if (data.error) { addNotice("⚠️ " + escapeHtml(data.error), "err"); return; }
+  const messages = data.messages || [];
+  const settings = data.settings;
   applySettings(settings); // restaura provider/modelo/prompt/temperature/tools da conversa
+
+  // se esta conversa for um teste, ela guarda uma mensagem com o relatório
+  const repMsg = messages.find((m) => m.extra && m.extra.kind === "tester_report");
+  state.currentReport = repMsg ? {
+    report: repMsg.extra.report || {},
+    turns: repMsg.extra.turns || 0,
+    // reconstrói a transcrição a partir dos balões (ignora a msg de relatório)
+    transcript: messages
+      .filter((m) => !(m.extra && m.extra.kind === "tester_report"))
+      .filter((m) => m.type === "human" || m.type === "ai")
+      .map((m) => ({ role: m.type === "human" ? "user" : "assistant", content: m.content })),
+  } : null;
+  toggleReportButton();
+
   const box = $("messages");
   box.innerHTML = "";
   messages.forEach((m) => {
+    if (m.extra && m.extra.kind === "tester_report") return; // não é balão; abre no modal
     if (m.type === "human") addBubble(m.content, "out", m.created_at);
     else if (m.type === "ai") {
       const acts = (m.extra && m.extra.tool_activations) || [];
@@ -558,6 +629,7 @@ async function send() {
   if (!text || state.sending) return;
   if (!state.sessionId) state.sessionId = "sess-" + Date.now();
 
+  const wasNew = !state.sessionExists; // só recarrega a lista se criar conversa nova
   state.sending = true;
   $("send").disabled = true;
   addBubble(text, "out", Date.now() / 1000);
@@ -596,7 +668,8 @@ async function send() {
 
   state.sending = false;
   $("send").disabled = false;
-  loadSessions();
+  // evita rebuild da barra lateral a cada mensagem; só atualiza ao criar conversa nova
+  if (wasNew && !res.error) loadSessions();
   input.focus();
 }
 
@@ -612,6 +685,160 @@ async function clearMemory() {
   showEmptyState();
   addNotice("🧹 Memória limpa.", "ctx");
   loadSessions();
+}
+
+/* --------------------- AGENTE TESTADOR (modal) --------------------- */
+function openTesterModal() { $("testerModal").classList.remove("hidden"); }
+function closeTesterModal() { $("testerModal").classList.add("hidden"); }
+
+// popup de "o que testar?" — abre ao clicar no 🤖, antes de rodar o teste
+function openFocusPrompt() {
+  if (state.testing) return;
+  if (!$("model").value.trim()) {
+    openModelList();
+    $("saveStatus").textContent = "⚠️ Selecione um modelo antes de testar.";
+    return;
+  }
+  $("focusInput").value = $("testerFocus").value || ""; // pré-preenche com o último foco
+  $("focusModal").classList.remove("hidden");
+  $("focusInput").focus();
+}
+function closeFocusPrompt() { $("focusModal").classList.add("hidden"); }
+
+// confirma o foco digitado e dispara o teste
+function confirmFocusAndRun() {
+  // sincroniza com o campo da config (vai junto no collectTesterSettings e persiste se salvar)
+  $("testerFocus").value = $("focusInput").value.trim();
+  closeFocusPrompt();
+  runTester();
+}
+
+// dispara o teste automatico usando a config DESTA conversa (a IA-alvo)
+async function runTester() {
+  if (state.testing) return;
+  const settings = collectSettings();
+  if (!settings.model) {
+    openModelList();
+    $("saveStatus").textContent = "⚠️ Selecione um modelo antes de testar.";
+    return;
+  }
+
+  state.testing = true;
+  $("runTester").disabled = true;
+  openTesterModal();
+  $("testerBody").innerHTML = `
+    <div class="tester-running">
+      <div class="spinner"></div>
+      <p>O agente testador está conversando com a IA-alvo e montando o relatório…</p>
+      <p class="muted">Isso pode levar de alguns segundos a alguns minutos, conforme o nº de turnos e o modelo.</p>
+    </div>`;
+
+  let res;
+  try {
+    res = await api("/api/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // envia tb a config do testador (inclui o "foco") p/ valer já, sem salvar antes
+      body: JSON.stringify({ session_id: state.sessionId, settings, tester: collectTesterSettings() }),
+    });
+  } catch (e) {
+    res = { error: "Falha de rede: " + e.message };
+  }
+
+  if (res.error) {
+    $("testerBody").innerHTML =
+      `<div class="notice err" style="max-width:none">⚠️ ${escapeHtml(res.error)}</div>`;
+  } else {
+    renderReport(res.report || {}, res.transcript || [], res.turns || 0);
+    if (res.save_error) {
+      const w = document.createElement("div");
+      w.className = "notice err";
+      w.style.maxWidth = "none";
+      w.textContent = "⚠️ " + res.save_error + " (o relatório acima não foi salvo na lista).";
+      $("testerBody").prepend(w);
+    }
+    // a conversa de teste foi salva como sessão: aparece na lista e abre com o botão 📊
+    await loadSessions();
+    if (res.session_id && !res.save_error) await openSession(res.session_id);
+  }
+
+  state.testing = false;
+  $("runTester").disabled = false;
+}
+
+// mostra/oculta o botão "Ver relatório" conforme a conversa aberta tenha um
+function toggleReportButton() {
+  $("openReport").classList.toggle("hidden", !state.currentReport);
+}
+
+// reabre, no modal, o relatório salvo da conversa atual
+function openReport() {
+  if (!state.currentReport) return;
+  const r = state.currentReport;
+  openTesterModal();
+  renderReport(r.report || {}, r.transcript || [], r.turns || 0);
+}
+
+// monta o relatorio legivel dentro do modal
+function renderReport(report, transcript, turns) {
+  const nota = report.nota;
+  const notaTxt = (nota === null || nota === undefined) ? "—" : nota;
+  const notaCls = (typeof nota === "number")
+    ? (nota >= 7 ? "good" : nota >= 4 ? "mid" : "bad") : "mid";
+
+  const list = (arr) => (Array.isArray(arr) && arr.length)
+    ? `<ul>${arr.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`
+    : `<p class="muted">—</p>`;
+
+  const examples = (Array.isArray(report.exemplos) && report.exemplos.length)
+    ? report.exemplos.map((ex) => `
+        <div class="report-example">
+          ${ex.observacao ? `<div class="ex-obs">${escapeHtml(ex.observacao)}</div>` : ""}
+          <div class="ex-line"><span class="ex-who user">Usuário</span> ${escapeHtml(ex.usuario || "")}</div>
+          <div class="ex-line"><span class="ex-who ia">IA</span> ${escapeHtml(ex.ia || "")}</div>
+        </div>`).join("")
+    : `<p class="muted">—</p>`;
+
+  const convo = transcript.map((m) => {
+    const dir = m.role === "user" ? "out" : "in";
+    const who = m.role === "user" ? "Usuário (testador)" : "IA-alvo";
+    return `<div class="bubble ${dir}"><span class="ex-who ${m.role === "user" ? "user" : "ia"}">${who}</span>${escapeHtml(m.content)}</div>`;
+  }).join("");
+
+  $("testerBody").innerHTML = `
+    <div class="report-top">
+      <div class="report-score ${notaCls}">
+        <span class="score-num">${escapeHtml(notaTxt)}</span>
+        <span class="score-max">/10</span>
+      </div>
+      <div class="report-summary">
+        <h3>Resumo geral</h3>
+        <p>${escapeHtml(report.resumo || "—")}</p>
+        <p class="muted">${turns} turno(s) de conversa simulada.</p>
+      </div>
+    </div>
+
+    <div class="report-grid">
+      <section class="card report-card">
+        <h3>✅ Pontos fortes</h3>${list(report.pontos_fortes)}
+      </section>
+      <section class="card report-card">
+        <h3>⚠️ Falhas / inconsistências</h3>${list(report.falhas)}
+      </section>
+    </div>
+
+    <section class="card report-card">
+      <h3>💡 Sugestões de melhoria no prompt</h3>${list(report.sugestoes)}
+    </section>
+
+    <section class="card report-card">
+      <h3>🔎 Exemplos reais da conversa</h3>${examples}
+    </section>
+
+    <details class="report-transcript">
+      <summary>Ver conversa simulada completa (${transcript.length} mensagens)</summary>
+      <div class="transcript-box">${convo || '<p class="muted">—</p>'}</div>
+    </details>`;
 }
 
 /* ----------------------------- helpers ----------------------------- */
@@ -637,6 +864,13 @@ $("provider").onchange = () => {
 };
 
 // combobox de modelo
+// um único listener delegado na lista (em vez de um por item)
+$("modelList").addEventListener("mousedown", (e) => {
+  const li = e.target.closest("li[data-id]");
+  if (!li) return;
+  e.preventDefault();
+  chooseModel(li.dataset.id);
+});
 // campo somente-seleção: abre a lista ao focar/clicar; sem digitação livre
 $("model").addEventListener("focus", openModelList);
 $("model").addEventListener("click", openModelList);
@@ -653,6 +887,29 @@ $("saveConfig").onclick = saveConfig;
 $("addTool").onclick = () => addToolRow();
 $("newChat").onclick = newChat;
 $("clearMemory").onclick = clearMemory;
+$("runTester").onclick = openFocusPrompt; // 🤖 abre o popup "o que testar?"
+$("openReport").onclick = openReport;
+$("testerClose").onclick = closeTesterModal;
+$("testerModal").addEventListener("click", (e) => {
+  if (e.target === $("testerModal")) closeTesterModal(); // clique no backdrop fecha
+});
+
+// popup de foco do teste
+$("focusRun").onclick = confirmFocusAndRun;
+$("focusCancel").onclick = closeFocusPrompt;
+$("focusCancel2").onclick = closeFocusPrompt;
+$("focusModal").addEventListener("click", (e) => {
+  if (e.target === $("focusModal")) closeFocusPrompt();
+});
+$("focusInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); confirmFocusAndRun(); }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!$("focusModal").classList.contains("hidden")) closeFocusPrompt();
+  else if (!$("testerModal").classList.contains("hidden")) closeTesterModal();
+});
 $("send").onclick = send;
 $("toggleConfig").onclick = () => document.querySelector(".app").classList.toggle("config-hidden");
 
