@@ -123,6 +123,7 @@ def _norm_session(r):
         "temperature": r.get("temperature"),
         "context_window": r.get("context_window"),
         "tools": r.get("tools") or [],
+        "folder_id": r.get("folder_id"),
     }
 
 
@@ -146,18 +147,22 @@ def ensure_session(session_id, title=None):
     upsert_session(session_id, title=title)
 
 
-def upsert_session(session_id, title=None, settings=None):
+def upsert_session(session_id, title=None, settings=None, folder_id=None):
     now = _iso()
     exists = get_session(session_id) is not None
     if not exists:
         row = {"session_id": session_id, "title": title or "Nova conversa",
                "created_at": now, "updated_at": now}
+        if folder_id:
+            row["folder_id"] = folder_id
         row.update(_settings_payload(settings))
         _req("POST", "sessions", body=[row], prefer="return=minimal")
     else:
         patch = {"updated_at": now}
         if title:
             patch["title"] = title
+        if folder_id:
+            patch["folder_id"] = folder_id
         patch.update(_settings_payload(settings))
         _req(
             "PATCH", "sessions",
@@ -244,4 +249,82 @@ def delete_session(session_id):
     _req(
         "DELETE", "sessions",
         params=[("session_id", f"eq.{session_id}")], prefer="return=minimal",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Pastas (clientes)
+# --------------------------------------------------------------------------- #
+def _norm_folder(r):
+    return {
+        "folder_id": r.get("folder_id"),
+        "name": r.get("name"),
+        "prompt": r.get("prompt"),
+        "updated_at": _to_epoch(r.get("updated_at")),
+    }
+
+
+def list_folders():
+    rows = _req("GET", "folders", params=[("select", "*"), ("order", "name.asc")])
+    # contagem de conversas por pasta (traz so folder_id e tabula)
+    counts = {}
+    try:
+        sess = _req("GET", "sessions", params=[("select", "folder_id")])
+        for s in sess:
+            fid = s.get("folder_id")
+            if fid:
+                counts[fid] = counts.get(fid, 0) + 1
+    except StorageError:
+        pass
+    out = []
+    for r in rows:
+        d = _norm_folder(r)
+        d["session_count"] = counts.get(d["folder_id"], 0)
+        out.append(d)
+    return out
+
+
+def create_folder(name, prompt=""):
+    folder_id = f"fold-{int(time.time() * 1000)}"
+    now = _iso()
+    _req(
+        "POST", "folders",
+        body=[{"folder_id": folder_id, "name": name or "Nova pasta",
+               "prompt": prompt or "", "created_at": now, "updated_at": now}],
+        prefer="return=minimal",
+    )
+    return {"folder_id": folder_id, "name": name or "Nova pasta",
+            "prompt": prompt or "", "updated_at": _to_epoch(now), "session_count": 0}
+
+
+def update_folder(folder_id, name=None, prompt=None):
+    patch = {"updated_at": _iso()}
+    if name is not None:
+        patch["name"] = name
+    if prompt is not None:
+        patch["prompt"] = prompt
+    _req(
+        "PATCH", "folders",
+        params=[("folder_id", f"eq.{folder_id}")], body=patch, prefer="return=minimal",
+    )
+
+
+def delete_folder(folder_id):
+    # desagrupa as conversas (nao apaga) e remove a pasta
+    _req(
+        "PATCH", "sessions",
+        params=[("folder_id", f"eq.{folder_id}")],
+        body={"folder_id": None}, prefer="return=minimal",
+    )
+    _req(
+        "DELETE", "folders",
+        params=[("folder_id", f"eq.{folder_id}")], prefer="return=minimal",
+    )
+
+
+def set_session_folder(session_id, folder_id):
+    _req(
+        "PATCH", "sessions",
+        params=[("session_id", f"eq.{session_id}")],
+        body={"folder_id": folder_id or None, "updated_at": _iso()}, prefer="return=minimal",
     )

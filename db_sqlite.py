@@ -35,6 +35,11 @@ _SETTINGS_COLS = {
     "tools": "TEXT",  # JSON
 }
 
+# colunas extras (nao-settings) adicionadas por migracao leve
+_EXTRA_COLS = {
+    "folder_id": "TEXT",  # pasta/cliente a que a conversa pertence (nulo = sem pasta)
+}
+
 
 def _connect():
     conn = sqlite3.connect(DB_PATH)
@@ -68,11 +73,23 @@ def init_db():
             );
             """
         )
-        # migracao leve: adiciona colunas de settings se faltarem
+        # migracao leve: adiciona colunas de settings/extras se faltarem
         existing = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
-        for col, typ in _SETTINGS_COLS.items():
+        for col, typ in {**_SETTINGS_COLS, **_EXTRA_COLS}.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {typ}")
+        # tabela de pastas (clientes): agrupa conversas e guarda o prompt do cliente
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS folders (
+                folder_id   TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                prompt      TEXT,
+                created_at  REAL NOT NULL,
+                updated_at  REAL NOT NULL
+            );
+            """
+        )
         conn.commit()
 
 
@@ -93,6 +110,7 @@ def _row_to_session(r):
         "temperature": r["temperature"],
         "context_window": r["context_window"],
         "tools": tools,
+        "folder_id": r["folder_id"] if "folder_id" in r.keys() else None,
     }
 
 
@@ -100,8 +118,12 @@ def ensure_session(session_id, title=None):
     upsert_session(session_id, title=title)
 
 
-def upsert_session(session_id, title=None, settings=None):
-    """Cria a sessao (se nao existe) e atualiza titulo e/ou settings."""
+def upsert_session(session_id, title=None, settings=None, folder_id=None):
+    """Cria a sessao (se nao existe) e atualiza titulo, settings e/ou pasta.
+
+    folder_id: passe uma string para mover para a pasta, "" (ou nao passe) para
+    nao mexer. Use set_session_folder(..., None) para desagrupar explicitamente.
+    """
     now = time.time()
     with _lock, _connect() as conn:
         row = conn.execute(
@@ -109,10 +131,16 @@ def upsert_session(session_id, title=None, settings=None):
         ).fetchone()
         if row is None:
             conn.execute(
-                "INSERT INTO sessions (session_id, title, created_at, updated_at) VALUES (?,?,?,?)",
-                (session_id, title or "Nova conversa", now, now),
+                "INSERT INTO sessions (session_id, title, folder_id, created_at, updated_at) VALUES (?,?,?,?,?)",
+                (session_id, title or "Nova conversa", folder_id or None, now, now),
             )
-        elif title:
+        else:
+            if folder_id:
+                conn.execute(
+                    "UPDATE sessions SET folder_id = ?, updated_at = ? WHERE session_id = ?",
+                    (folder_id, now, session_id),
+                )
+        if row is not None and title:
             conn.execute(
                 "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
                 (title, now, session_id),
@@ -234,4 +262,84 @@ def delete_session(session_id):
             "DELETE FROM n8n_chat_histories WHERE session_id = ?", (session_id,)
         )
         conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        conn.commit()
+
+
+# --------------------------------------------------------------------------- #
+# Pastas (clientes)
+# --------------------------------------------------------------------------- #
+def _row_to_folder(r):
+    return {
+        "folder_id": r["folder_id"],
+        "name": r["name"],
+        "prompt": r["prompt"],
+        "updated_at": r["updated_at"],
+    }
+
+
+def list_folders():
+    """Lista as pastas com a contagem de conversas em cada uma."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT f.*,
+                   (SELECT COUNT(*) FROM sessions s WHERE s.folder_id = f.folder_id) AS session_count
+            FROM folders f
+            ORDER BY f.name COLLATE NOCASE ASC
+            """
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = _row_to_folder(r)
+        d["session_count"] = r["session_count"]
+        out.append(d)
+    return out
+
+
+def create_folder(name, prompt=""):
+    folder_id = f"fold-{int(time.time() * 1000)}"
+    now = time.time()
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO folders (folder_id, name, prompt, created_at, updated_at) VALUES (?,?,?,?,?)",
+            (folder_id, name or "Nova pasta", prompt or "", now, now),
+        )
+        conn.commit()
+    return {"folder_id": folder_id, "name": name or "Nova pasta", "prompt": prompt or "",
+            "updated_at": now, "session_count": 0}
+
+
+def update_folder(folder_id, name=None, prompt=None):
+    now = time.time()
+    fields, vals = [], []
+    if name is not None:
+        fields.append("name = ?"); vals.append(name)
+    if prompt is not None:
+        fields.append("prompt = ?"); vals.append(prompt)
+    if not fields:
+        return
+    fields.append("updated_at = ?"); vals.append(now)
+    vals.append(folder_id)
+    with _lock, _connect() as conn:
+        conn.execute(f"UPDATE folders SET {', '.join(fields)} WHERE folder_id = ?", vals)
+        conn.commit()
+
+
+def delete_folder(folder_id):
+    """Remove a pasta; as conversas dela viram 'sem pasta' (nao sao apagadas)."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET folder_id = NULL WHERE folder_id = ?", (folder_id,)
+        )
+        conn.execute("DELETE FROM folders WHERE folder_id = ?", (folder_id,))
+        conn.commit()
+
+
+def set_session_folder(session_id, folder_id):
+    """Move uma conversa para uma pasta (folder_id None/"" = sem pasta)."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET folder_id = ?, updated_at = ? WHERE session_id = ?",
+            (folder_id or None, time.time(), session_id),
+        )
         conn.commit()

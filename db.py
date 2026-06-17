@@ -59,8 +59,10 @@ def ensure_session(session_id, title=None):
     return _backend().ensure_session(session_id, title=title)
 
 
-def upsert_session(session_id, title=None, settings=None):
-    return _backend().upsert_session(session_id, title=title, settings=settings)
+def upsert_session(session_id, title=None, settings=None, folder_id=None):
+    return _backend().upsert_session(
+        session_id, title=title, settings=settings, folder_id=folder_id
+    )
 
 
 def get_session(session_id):
@@ -85,3 +87,24 @@ def clear_session(session_id):
 
 def delete_session(session_id):
     return _backend().delete_session(session_id)
+
+
+# ---- pastas (clientes) ----
+def list_folders():
+    return _backend().list_folders()
+
+
+def create_folder(name, prompt=""):
+    return _backend().create_folder(name, prompt=prompt)
+
+
+def update_folder(folder_id, name=None, prompt=None):
+    return _backend().update_folder(folder_id, name=name, prompt=prompt)
+
+
+def delete_folder(folder_id):
+    return _backend().delete_folder(folder_id)
+
+
+def set_session_folder(session_id, folder_id):
+    return _backend().set_session_folder(session_id, folder_id)

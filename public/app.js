@@ -157,6 +157,11 @@ let state = {
   testing: false, // true enquanto o Agente Testador roda
   sessionExists: false, // true quando a conversa atual já tem settings/mensagens salvas
   currentReport: null, // relatório da conversa aberta (p/ reabrir no modal), se houver
+  folders: [], // pastas (clientes) carregadas
+  activeFolderId: null, // pasta ativa (novas conversas/testes entram nela)
+  collapsed: new Set(), // pastas recolhidas na lista (e "__none__" p/ "Sem pasta")
+  moveSessionId: null, // conversa sendo movida pelo modal
+  editingFolderId: null, // pasta sendo editada pelo modal (null = criando)
 };
 
 // modelos buscados ao vivo na API (cache por provedor, durante a sessão)
@@ -465,29 +470,104 @@ async function saveConfig() {
   setTimeout(() => (status.textContent = ""), 2000);
 }
 
-/* ----------------------------- SESSIONS ----------------------------- */
+/* ----------------------------- SESSIONS / PASTAS ----------------------------- */
 async function loadSessions() {
-  const data = await api("/api/sessions");
-  const sessions = data.sessions || []; // resiliente a erro/resposta inesperada
+  // busca pastas + conversas em paralelo e renderiza agrupado
+  const [fData, sData] = await Promise.all([api("/api/folders"), api("/api/sessions")]);
+  state.folders = fData.folders || [];
+  const sessions = sData.sessions || [];
   const ul = $("sessionList");
   ul.innerHTML = "";
-  if (!sessions.length) {
+
+  // separa conversas por pasta
+  const byFolder = {};
+  const ungrouped = [];
+  sessions.forEach((s) => {
+    if (s.folder_id) (byFolder[s.folder_id] = byFolder[s.folder_id] || []).push(s);
+    else ungrouped.push(s);
+  });
+
+  // pastas (já vêm ordenadas por nome do backend)
+  state.folders.forEach((f) => {
+    ul.appendChild(renderFolderHead(f));
+    if (!state.collapsed.has(f.folder_id)) {
+      (byFolder[f.folder_id] || []).forEach((s) => ul.appendChild(renderSessionItem(s, true)));
+    }
+  });
+
+  // grupo "Sem pasta" (só se houver avulsas)
+  if (ungrouped.length) {
+    ul.appendChild(renderUngroupedHead(ungrouped.length));
+    if (!state.collapsed.has("__none__")) {
+      ungrouped.forEach((s) => ul.appendChild(renderSessionItem(s, false)));
+    }
+  }
+
+  if (!sessions.length && !state.folders.length) {
     ul.innerHTML = `<li class="muted" style="cursor:default">Nenhuma conversa ainda.</li>`;
   }
-  sessions.forEach((s) => {
-    const li = document.createElement("li");
-    if (s.session_id === state.sessionId) li.classList.add("active");
-    li.innerHTML = `
-      <div class="s-title">${escapeHtml(s.title || "Conversa")}</div>
-      <div class="s-meta">${s.msg_count} msgs · ${fmtTime(s.updated_at)}</div>
-      <button class="s-del" title="Excluir conversa">🗑️</button>`;
-    li.onclick = () => openSession(s.session_id);
-    li.querySelector(".s-del").onclick = (e) => {
-      e.stopPropagation(); // não abre a conversa ao clicar na lixeira
-      deleteSession(s.session_id);
-    };
-    ul.appendChild(li);
-  });
+}
+
+// cabeçalho de uma pasta (recolhível + ativa + ações)
+function renderFolderHead(f) {
+  const li = document.createElement("li");
+  li.className = "folder-head" + (f.folder_id === state.activeFolderId ? " active" : "");
+  const caret = state.collapsed.has(f.folder_id) ? "▸" : "▾";
+  li.innerHTML = `
+    <span class="fold-caret">${caret}</span>
+    <span class="fold-name">🗂️ ${escapeHtml(f.name)}</span>
+    <span class="fold-count">${f.session_count}</span>
+    <button class="fold-edit" title="Editar pasta">✎</button>
+    <button class="fold-del" title="Excluir pasta">🗑️</button>`;
+  // clicar no cabeçalho: torna a pasta ativa e a expande
+  li.onclick = () => { setActiveFolder(f.folder_id); ensureExpanded(f.folder_id); loadSessions(); };
+  // o caret apenas recolhe/expande (sem mexer na ativa)
+  li.querySelector(".fold-caret").onclick = (e) => { e.stopPropagation(); toggleCollapse(f.folder_id); };
+  li.querySelector(".fold-edit").onclick = (e) => { e.stopPropagation(); openFolderModal(f); };
+  li.querySelector(".fold-del").onclick = (e) => { e.stopPropagation(); deleteFolder(f); };
+  return li;
+}
+
+// cabeçalho do grupo "Sem pasta"
+function renderUngroupedHead(count) {
+  const li = document.createElement("li");
+  li.className = "folder-head" + (state.activeFolderId === null ? " active" : "");
+  const caret = state.collapsed.has("__none__") ? "▸" : "▾";
+  li.innerHTML = `
+    <span class="fold-caret">${caret}</span>
+    <span class="fold-name muted-name">Sem pasta</span>
+    <span class="fold-count">${count}</span>`;
+  li.onclick = () => { setActiveFolder(null); state.collapsed.delete("__none__"); loadSessions(); };
+  li.querySelector(".fold-caret").onclick = (e) => { e.stopPropagation(); toggleCollapse("__none__"); };
+  return li;
+}
+
+// item de conversa (reutilizado em pasta e em "sem pasta")
+function renderSessionItem(s, inFolder) {
+  const li = document.createElement("li");
+  li.className = "session-item" + (inFolder ? " in-folder" : "");
+  if (s.session_id === state.sessionId) li.classList.add("active");
+  li.innerHTML = `
+    <div class="s-title">${escapeHtml(s.title || "Conversa")}</div>
+    <div class="s-meta">${s.msg_count} msgs · ${fmtTime(s.updated_at)}</div>
+    <button class="s-move" title="Mover para pasta">📁</button>
+    <button class="s-del" title="Excluir conversa">🗑️</button>`;
+  li.onclick = () => openSession(s.session_id);
+  li.querySelector(".s-move").onclick = (e) => { e.stopPropagation(); openMoveModal(s.session_id); };
+  li.querySelector(".s-del").onclick = (e) => { e.stopPropagation(); deleteSession(s.session_id); };
+  return li;
+}
+
+function toggleCollapse(key) {
+  if (state.collapsed.has(key)) state.collapsed.delete(key);
+  else state.collapsed.add(key);
+  loadSessions();
+}
+function ensureExpanded(key) { state.collapsed.delete(key); }
+
+// define a pasta ativa (novas conversas/testes entram nela)
+function setActiveFolder(folderId) {
+  state.activeFolderId = folderId;
 }
 
 // exclui uma conversa (com confirmação) e atualiza a lista
@@ -503,11 +583,195 @@ async function deleteSession(id) {
   else loadSessions();
 }
 
+/* ------------- pastas: modal criar/editar, excluir, mover ------------- */
+function folderById(id) { return state.folders.find((f) => f.folder_id === id) || null; }
+
+// mensagem amigável quando o banco ainda não tem a tabela/coluna de pastas
+function folderErrorMsg(err) {
+  const e = String(err || "");
+  if (/folders|folder_id|PGRST205|schema cache/i.test(e)) {
+    return "As pastas/projetos ainda não foram ativados no banco de dados.\n\n" +
+      "Rode uma vez o SQL do arquivo supabase_schema.sql no painel do Supabase " +
+      "(SQL Editor) para criar a tabela 'folders' e a coluna 'folder_id'. " +
+      "Depois recarregue a página (Ctrl+F5).";
+  }
+  return e;
+}
+
+function openFolderModal(folder) {
+  state.editingFolderId = folder ? folder.folder_id : null;
+  $("folderModalTitle").textContent = folder ? "🗂️ Editar pasta" : "🗂️ Nova pasta";
+  $("folderName").value = folder ? (folder.name || "") : "";
+  $("folderPrompt").value = folder ? (folder.prompt || "") : "";
+  $("folderModal").classList.remove("hidden");
+  $("folderName").focus();
+}
+function closeFolderModal() { $("folderModal").classList.add("hidden"); }
+
+async function saveFolder() {
+  const name = $("folderName").value.trim();
+  if (!name) { $("folderName").focus(); return; }
+  const editing = state.editingFolderId;
+  const payload = { name, prompt: $("folderPrompt").value };
+  if (editing) payload.folder_id = editing;
+  const res = await api("/api/folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (res && res.error) { alert(folderErrorMsg(res.error)); return; }
+  // ao criar uma nova pasta, já a deixa ativa
+  if (!editing && res.folder) setActiveFolder(res.folder.folder_id);
+  closeFolderModal();
+  await loadSessions();
+  // se a tela de Projetos estiver aberta, reflete lá (e abre o projeto recém-criado)
+  if (projectsOpen()) {
+    await refreshProjects();
+    if (!editing && res.folder) openProject(res.folder.folder_id);
+  }
+}
+
+async function deleteFolder(f) {
+  if (!confirm(`Excluir a pasta "${f.name}"? As conversas dela NÃO são apagadas — voltam para "Sem pasta".`)) return;
+  const res = await api("/api/folder/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder_id: f.folder_id }),
+  });
+  if (res && res.error) { addNotice("⚠️ " + escapeHtml(res.error), "err"); return; }
+  if (state.activeFolderId === f.folder_id) setActiveFolder(null);
+  await loadSessions();
+}
+
+function openMoveModal(sessionId) {
+  state.moveSessionId = sessionId;
+  const sel = $("moveSelect");
+  sel.innerHTML = `<option value="">— Sem pasta —</option>` +
+    state.folders.map((f) => `<option value="${escapeAttr(f.folder_id)}">${escapeHtml(f.name)}</option>`).join("");
+  $("moveModal").classList.remove("hidden");
+}
+function closeMoveModal() { $("moveModal").classList.add("hidden"); }
+
+async function confirmMove() {
+  const folderId = $("moveSelect").value || null;
+  const res = await api("/api/session/move", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: state.moveSessionId, folder_id: folderId }),
+  });
+  if (res && res.error) { addNotice("⚠️ " + escapeHtml(res.error), "err"); return; }
+  closeMoveModal();
+  await loadSessions();
+}
+
+/* --------------------- TELA DE PROJETOS (estilo Claude) --------------------- */
+const projectsOpen = () => !$("projectsOverlay").classList.contains("hidden");
+
+async function openProjects() {
+  $("projectsOverlay").classList.remove("hidden");
+  showProjectsGrid();
+  await refreshProjects();
+}
+function closeProjects() { $("projectsOverlay").classList.add("hidden"); }
+
+function showProjectsGrid() {
+  state.openProjectId = null;
+  $("projectsGridView").classList.remove("hidden");
+  $("projectDetailView").classList.add("hidden");
+}
+
+// busca pastas + conversas (cache) e re-renderiza a vista atual
+async function refreshProjects() {
+  const [fData, sData] = await Promise.all([api("/api/folders"), api("/api/sessions")]);
+  state.folders = fData.folders || [];
+  state._allSessions = sData.sessions || [];
+  if (state.openProjectId) renderProjectDetail(state.openProjectId);
+  else renderProjectsGrid();
+}
+
+function renderProjectsGrid() {
+  const grid = $("projectsGrid");
+  const q = ($("projectsSearch").value || "").trim().toLowerCase();
+  let list = state.folders.slice();
+  if (q) list = list.filter((f) => (f.name || "").toLowerCase().includes(q));
+  if ($("projectsSort").value === "name")
+    list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  else list.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+
+  if (!list.length) {
+    grid.innerHTML = `<div class="projects-empty">${q ? "Nenhum projeto encontrado." : "Nenhum projeto ainda. Crie o primeiro em “＋ Novo projeto”."}</div>`;
+    return;
+  }
+  grid.innerHTML = list.map((f) => `
+    <div class="project-card" data-id="${escapeAttr(f.folder_id)}">
+      <div class="pc-name">${escapeHtml(f.name)}</div>
+      <div class="pc-prompt">${escapeHtml(f.prompt || "Sem instruções.")}</div>
+      <div class="pc-meta"><span>${f.session_count} conversa(s)</span><span>Atualizado ${fmtAgo(f.updated_at)}</span></div>
+    </div>`).join("");
+}
+
+function openProject(folderId) {
+  state.openProjectId = folderId;
+  $("projectsGridView").classList.add("hidden");
+  $("projectDetailView").classList.remove("hidden");
+  renderProjectDetail(folderId);
+}
+
+function renderProjectDetail(folderId) {
+  const f = folderById(folderId);
+  if (!f) { showProjectsGrid(); renderProjectsGrid(); return; }
+  $("projectDetailName").textContent = f.name;
+  $("projectPrompt").value = f.prompt || "";
+  const convos = (state._allSessions || [])
+    .filter((s) => s.folder_id === folderId)
+    .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  $("projectConvoCount").textContent = `(${convos.length})`;
+  const box = $("projectConvos");
+  box.innerHTML = convos.length
+    ? convos.map((s) => `
+        <div class="pconvo" data-sid="${escapeAttr(s.session_id)}">
+          <span class="pc-title">${escapeHtml(s.title || "Conversa")}</span>
+          <span class="pc-sub">${s.msg_count} msgs · ${fmtAgo(s.updated_at)}</span>
+        </div>`).join("")
+    : `<div class="empty">Nenhuma conversa neste projeto ainda.</div>`;
+}
+
+async function saveProjectPrompt() {
+  const id = state.openProjectId;
+  if (!id) return;
+  const res = await api("/api/folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder_id: id, prompt: $("projectPrompt").value }),
+  });
+  const st = $("projectPromptStatus");
+  if (res && res.error) { st.textContent = "⚠️ " + res.error; return; }
+  st.textContent = "✓ Salvo";
+  setTimeout(() => (st.textContent = ""), 1500);
+  await refreshProjects();
+  loadSessions(); // reflete na barra lateral tb
+}
+
+// tempo relativo ("há 7 dias", "há 2 h"); cai para data se muito antigo
+function fmtAgo(ts) {
+  if (!ts) return "";
+  const diff = Date.now() / 1000 - ts;
+  if (diff < 60) return "agora";
+  if (diff < 3600) return `há ${Math.floor(diff / 60)} min`;
+  if (diff < 86400) return `há ${Math.floor(diff / 3600)} h`;
+  const d = Math.floor(diff / 86400);
+  if (d < 30) return `há ${d} dia${d > 1 ? "s" : ""}`;
+  return new Date(ts * 1000).toLocaleDateString("pt-BR");
+}
+
 function newChat() {
   state.sessionId = "sess-" + Date.now();
   state.sessionExists = false; // ainda não salva; usa os defaults do painel
   state.currentReport = null;
   toggleReportButton();
+  // conversa nova nasce na pasta ativa; pré-preenche o prompt do cliente (se houver)
+  const f = folderById(state.activeFolderId);
+  if (f && f.prompt) $("systemPrompt").value = f.prompt;
   $("messages").innerHTML = "";
   showEmptyState();
   loadSessions();
@@ -523,6 +787,7 @@ async function openSession(id) {
   const messages = data.messages || [];
   const settings = data.settings;
   applySettings(settings); // restaura provider/modelo/prompt/temperature/tools da conversa
+  state.activeFolderId = (settings && settings.folder_id) || null; // herda a pasta da conversa
 
   // se esta conversa for um teste, ela guarda uma mensagem com o relatório
   const repMsg = messages.find((m) => m.extra && m.extra.kind === "tester_report");
@@ -646,6 +911,8 @@ async function send() {
         session_id: state.sessionId,
         message: text,
         settings: collectSettings(), // config DESTA conversa
+        // só atribui pasta ao CRIAR a conversa (evita mover conversa existente)
+        folder_id: wasNew ? state.activeFolderId : null,
       }),
     });
   } catch (e) {
@@ -738,8 +1005,8 @@ async function runTester() {
     res = await api("/api/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // envia tb a config do testador (inclui o "foco") p/ valer já, sem salvar antes
-      body: JSON.stringify({ session_id: state.sessionId, settings, tester: collectTesterSettings() }),
+      // envia tb a config do testador (inclui o "foco") e a pasta ativa
+      body: JSON.stringify({ session_id: state.sessionId, settings, tester: collectTesterSettings(), folder_id: state.activeFolderId }),
     });
   } catch (e) {
     res = { error: "Falha de rede: " + e.message };
@@ -887,6 +1154,45 @@ $("saveConfig").onclick = saveConfig;
 $("addTool").onclick = () => addToolRow();
 $("newChat").onclick = newChat;
 $("clearMemory").onclick = clearMemory;
+
+// tela de Projetos
+$("openProjects").onclick = openProjects;
+$("projectsClose").onclick = closeProjects;
+$("projectDetailClose").onclick = closeProjects;
+$("projectBack").onclick = () => { showProjectsGrid(); renderProjectsGrid(); };
+$("projectsSearch").addEventListener("input", renderProjectsGrid);
+$("projectsSort").addEventListener("change", renderProjectsGrid);
+$("newProject").onclick = () => openFolderModal(null);
+$("projectRename").onclick = () => openFolderModal(folderById(state.openProjectId));
+$("projectDelete").onclick = async () => {
+  const f = folderById(state.openProjectId);
+  if (!f) return;
+  await deleteFolder(f);
+  showProjectsGrid();
+  if (projectsOpen()) await refreshProjects();
+};
+$("projectPromptSave").onclick = saveProjectPrompt;
+$("projectNewChat").onclick = () => { setActiveFolder(state.openProjectId); closeProjects(); newChat(); };
+$("projectRunTest").onclick = () => { setActiveFolder(state.openProjectId); closeProjects(); openFocusPrompt(); };
+$("projectsGrid").addEventListener("click", (e) => {
+  const card = e.target.closest(".project-card[data-id]");
+  if (card) openProject(card.dataset.id);
+});
+$("projectConvos").addEventListener("click", (e) => {
+  const row = e.target.closest(".pconvo[data-sid]");
+  if (row) { closeProjects(); openSession(row.dataset.sid); }
+});
+
+// modal de pasta (criar/editar)
+$("folderSave").onclick = saveFolder;
+$("folderCancel").onclick = closeFolderModal;
+$("folderCancel2").onclick = closeFolderModal;
+$("folderModal").addEventListener("click", (e) => { if (e.target === $("folderModal")) closeFolderModal(); });
+// modal de mover conversa
+$("moveConfirm").onclick = confirmMove;
+$("moveCancel").onclick = closeMoveModal;
+$("moveCancel2").onclick = closeMoveModal;
+$("moveModal").addEventListener("click", (e) => { if (e.target === $("moveModal")) closeMoveModal(); });
 $("runTester").onclick = openFocusPrompt; // 🤖 abre o popup "o que testar?"
 $("openReport").onclick = openReport;
 $("testerClose").onclick = closeTesterModal;
@@ -907,8 +1213,11 @@ $("focusInput").addEventListener("keydown", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!$("focusModal").classList.contains("hidden")) closeFocusPrompt();
+  if (!$("folderModal").classList.contains("hidden")) closeFolderModal();
+  else if (!$("moveModal").classList.contains("hidden")) closeMoveModal();
+  else if (!$("focusModal").classList.contains("hidden")) closeFocusPrompt();
   else if (!$("testerModal").classList.contains("hidden")) closeTesterModal();
+  else if (projectsOpen()) closeProjects();
 });
 $("send").onclick = send;
 $("toggleConfig").onclick = () => document.querySelector(".app").classList.toggle("config-hidden");

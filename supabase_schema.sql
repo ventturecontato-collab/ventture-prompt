@@ -3,6 +3,15 @@
 --  Rode este SQL no painel do Supabase: SQL Editor -> New query -> Run
 -- ============================================================
 
+-- Tabela de pastas/clientes (agrupa conversas e guarda o prompt do cliente)
+create table if not exists folders (
+  folder_id   text primary key,
+  name        text not null,
+  prompt      text,
+  created_at  timestamptz default now(),
+  updated_at  timestamptz default now()
+);
+
 -- Tabela de conversas (cada conversa guarda a propria configuracao)
 create table if not exists sessions (
   session_id     text primary key,
@@ -13,9 +22,14 @@ create table if not exists sessions (
   temperature    real,
   context_window int,
   tools          jsonb default '[]'::jsonb,
+  folder_id      text references folders(folder_id) on delete set null,
   created_at     timestamptz default now(),
   updated_at     timestamptz default now()
 );
+
+-- Migracao para bancos existentes: adiciona a coluna folder_id se faltar
+alter table sessions add column if not exists folder_id text references folders(folder_id) on delete set null;
+create index if not exists idx_sessions_folder on sessions(folder_id);
 
 -- Tabela de mensagens (memoria estilo "Postgres Chat Memory" do n8n/LangChain)
 create table if not exists n8n_chat_histories (

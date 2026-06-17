@@ -114,7 +114,10 @@
     <nav class="sessions">
       <div class="sessions-header">
         <span>Conversas</span>
-        <button id="newChat" title="Nova conversa">＋</button>
+        <div class="sessions-actions">
+          <button id="openProjects" title="Projetos (clientes)">🗂️ Projetos</button>
+          <button id="newChat" title="Nova conversa">＋</button>
+        </div>
       </div>
       <ul id="sessionList"></ul>
     </nav>
@@ -172,6 +175,96 @@
       </header>
       <div class="modal-body" id="testerBody">
         <!-- preenchido por app.js -->
+      </div>
+    </div>
+  </div>
+
+  <!-- TELA: Projetos (clientes) estilo Claude -->
+  <div class="projects-overlay hidden" id="projectsOverlay">
+    <div class="projects-panel">
+
+      <!-- VISTA: grade de projetos -->
+      <div id="projectsGridView">
+        <header class="projects-head">
+          <h2>Projetos</h2>
+          <div class="projects-head-actions">
+            <select id="projectsSort" title="Ordenar">
+              <option value="updated">Última atualização</option>
+              <option value="name">Nome (A–Z)</option>
+            </select>
+            <button class="btn-primary" id="newProject">＋ Novo projeto</button>
+            <button class="modal-close" id="projectsClose" title="Fechar">✕</button>
+          </div>
+        </header>
+        <input id="projectsSearch" placeholder="Buscar projetos..." />
+        <div class="projects-grid" id="projectsGrid"></div>
+      </div>
+
+      <!-- VISTA: detalhe de um projeto -->
+      <div id="projectDetailView" class="hidden">
+        <header class="projects-head">
+          <button class="back-btn" id="projectBack" title="Voltar">←</button>
+          <h2 id="projectDetailName">Projeto</h2>
+          <div class="projects-head-actions">
+            <button class="icon-btn" id="projectRename" title="Renomear">✎</button>
+            <button class="icon-btn danger" id="projectDelete" title="Excluir projeto">🗑️</button>
+            <button class="modal-close" id="projectDetailClose" title="Fechar">✕</button>
+          </div>
+        </header>
+        <div class="project-detail-body">
+          <section class="card">
+            <h3>📝 Instruções (prompt do cliente)</h3>
+            <p class="muted">Novas conversas e testes neste projeto já vêm com este prompt.</p>
+            <textarea id="projectPrompt" rows="6" placeholder="Prompt-padrão deste cliente..."></textarea>
+            <button class="btn-ghost" id="projectPromptSave">Salvar instruções</button>
+            <span class="save-status" id="projectPromptStatus"></span>
+          </section>
+          <div class="project-actions">
+            <button class="btn-primary" id="projectNewChat">＋ Nova conversa</button>
+            <button class="btn-ghost" id="projectRunTest">🤖 Testar prompt</button>
+          </div>
+          <h3 class="project-convos-title">Conversas <span class="muted" id="projectConvoCount"></span></h3>
+          <div id="projectConvos"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- MODAL: criar/editar pasta (cliente) -->
+  <div class="modal-overlay hidden" id="folderModal">
+    <div class="modal modal-sm">
+      <header class="modal-header">
+        <strong id="folderModalTitle">🗂️ Nova pasta</strong>
+        <button class="modal-close" id="folderCancel" title="Fechar">✕</button>
+      </header>
+      <div class="modal-body">
+        <label>Nome do cliente / pasta</label>
+        <input id="folderName" placeholder="Ex.: ClienteX" />
+        <label>Prompt do cliente (opcional)</label>
+        <textarea id="folderPrompt" rows="6" placeholder="Prompt-padrão deste cliente. Novas conversas/testes nesta pasta já vêm com ele."></textarea>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="folderCancel2">Cancelar</button>
+          <button class="btn-primary" id="folderSave">Salvar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: mover conversa para uma pasta -->
+  <div class="modal-overlay hidden" id="moveModal">
+    <div class="modal modal-sm">
+      <header class="modal-header">
+        <strong>📁 Mover conversa</strong>
+        <button class="modal-close" id="moveCancel" title="Fechar">✕</button>
+      </header>
+      <div class="modal-body">
+        <label>Escolha a pasta</label>
+        <select id="moveSelect"></select>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="moveCancel2">Cancelar</button>
+          <button class="btn-primary" id="moveConfirm">Mover</button>
+        </div>
       </div>
     </div>
   </div>

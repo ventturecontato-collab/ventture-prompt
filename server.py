@@ -42,7 +42,7 @@ MAX_FOCUS_CHARS = 4_000       # "foco do teste" do Agente Testador
 # --------------------------------------------------------------------------- #
 # Orquestracao do chat
 # --------------------------------------------------------------------------- #
-def run_chat(session_id, user_text, settings=None):
+def run_chat(session_id, user_text, settings=None, folder_id=None):
     cfg = config.load()
     s = settings or {}
 
@@ -61,6 +61,7 @@ def run_chat(session_id, user_text, settings=None):
             "provider": provider, "model": model, "system_prompt": system,
             "temperature": temperature, "context_window": ctx_window, "tools": tools,
         },
+        folder_id=folder_id,  # so move/atribui quando vier preenchido (conversa nova)
     )
 
     # 1) grava a mensagem do usuario na memoria
@@ -136,7 +137,7 @@ def run_chat(session_id, user_text, settings=None):
     }
 
 
-def _persist_test(result, settings):
+def _persist_test(result, settings, folder_id=None):
     """Salva a conversa simulada do Agente Testador como uma sessao normal.
 
     - A conversa vira mensagens human/ai (aparece igual as outras na lista).
@@ -153,8 +154,8 @@ def _persist_test(result, settings):
     nota = report.get("nota")
     title = "🤖 Teste: " + base + (f" (nota {nota})" if nota is not None else "")
 
-    # a sessao guarda a config da IA-alvo que foi testada
-    db.upsert_session(test_sid, title=title, settings=settings or None)
+    # a sessao guarda a config da IA-alvo que foi testada (e a pasta, se houver)
+    db.upsert_session(test_sid, title=title, settings=settings or None, folder_id=folder_id)
 
     # baloes da conversa (com selo do modelo da IA-alvo nas respostas)
     ai_extra = {"provider": result.get("target_provider"), "model": result.get("target_model")}
@@ -264,6 +265,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sessions":
             self._send_json({"sessions": db.list_sessions()})
             return
+        if path == "/api/folders":
+            # degrada para lista vazia se o backend ainda nao tem a tabela folders
+            # (ex.: Supabase sem o schema novo aplicado) -> o app continua funcionando
+            try:
+                self._send_json({"folders": db.list_folders()})
+            except Exception as e:  # noqa
+                self._send_json({"folders": [], "error": f"Pastas indisponiveis: {e}"})
+            return
         if path == "/api/models":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             provider = (qs.get("provider", [""])[0]) or config.load().get("provider", "openai")
@@ -340,7 +349,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                result = run_chat(session_id, text, settings=body.get("settings"))
+                result = run_chat(
+                    session_id, text,
+                    settings=body.get("settings"), folder_id=body.get("folder_id"),
+                )
                 result["session_id"] = session_id
                 self._send_json(result)
             except providers.ProviderError as e:
@@ -370,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = tester.run_test(cfg, settings)
                 try:
-                    result["session_id"] = _persist_test(result, settings)
+                    result["session_id"] = _persist_test(result, settings, folder_id=body.get("folder_id"))
                 except Exception as e:  # noqa - nao perde o relatorio se o save falhar
                     result["save_error"] = f"Falha ao salvar a sessao de teste: {e}"
                 self._send_json(result)
@@ -380,6 +392,46 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e), "kind": kind}, status=status)
             except Exception as e:  # noqa
                 self._send_json({"error": f"Erro interno: {e}"}, status=500)
+            return
+
+        if path == "/api/folder":
+            # cria (sem folder_id) ou edita (com folder_id) uma pasta/cliente
+            name = (body.get("name") or "").strip()
+            prompt = body.get("prompt")
+            fid = body.get("folder_id")
+            try:
+                if fid:
+                    db.update_folder(fid, name=name or None, prompt=prompt)
+                    self._send_json({"ok": True, "folder_id": fid})
+                else:
+                    if not name:
+                        self._send_json({"error": "Nome da pasta obrigatorio."}, status=400)
+                        return
+                    self._send_json({"ok": True, "folder": db.create_folder(name, prompt or "")})
+            except Exception as e:  # noqa
+                self._send_json({"error": f"Erro ao salvar pasta: {e}"}, status=500)
+            return
+
+        if path == "/api/folder/delete":
+            fid = body.get("folder_id")
+            try:
+                if fid:
+                    db.delete_folder(fid)
+                self._send_json({"ok": True})
+            except Exception as e:  # noqa
+                self._send_json({"error": f"Erro ao excluir pasta: {e}"}, status=500)
+            return
+
+        if path == "/api/session/move":
+            session_id = body.get("session_id")
+            if not session_id:
+                self._send_json({"error": "session_id obrigatorio."}, status=400)
+                return
+            try:
+                db.set_session_folder(session_id, body.get("folder_id"))
+                self._send_json({"ok": True})
+            except Exception as e:  # noqa
+                self._send_json({"error": f"Erro ao mover conversa: {e}"}, status=500)
             return
 
         if path == "/api/clear":
